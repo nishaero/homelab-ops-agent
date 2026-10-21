@@ -1,0 +1,13 @@
+[Unit]
+Description=Ops agent admin API - sidecar for the config/log UI
+After=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/root/ops-agent-api.env
+ExecStart=/usr/bin/python3 /root/ops_agent_api.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

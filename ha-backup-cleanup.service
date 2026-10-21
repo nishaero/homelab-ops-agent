@@ -1,0 +1,8 @@
+[Unit]
+Description=Delete Home Assistant backups older than retention window
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/root/ops-agent.env
+ExecStart=/usr/bin/python3 /root/ha_backup_cleanup.py

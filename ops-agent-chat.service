@@ -1,0 +1,13 @@
+[Unit]
+Description=Ops agent chat - synchronous conversational interface (same host/env as ops_agent.py)
+After=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/root/ops-agent.env
+ExecStart=/usr/bin/python3 /root/ops_agent_chat.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

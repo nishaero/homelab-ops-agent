@@ -1,0 +1,19 @@
+services:
+  ops-ui:
+    build: .
+    container_name: ops-ui
+    restart: unless-stopped
+    environment:
+      OPS_AGENT_API_BASE: "${OPS_AGENT_API_BASE}"
+      OPS_AGENT_API_TOKEN: "${OPS_AGENT_API_TOKEN}"
+      OPS_AGENT_CHAT_BASE: "${OPS_AGENT_CHAT_BASE}"
+      OPS_AGENT_CHAT_TOKEN: "${OPS_AGENT_CHAT_TOKEN}"
+      GITHUB_CLIENT_ID: "${GITHUB_CLIENT_ID}"
+      GITHUB_CLIENT_SECRET: "${GITHUB_CLIENT_SECRET}"
+      GITHUB_ALLOWED_LOGIN: "${GITHUB_ALLOWED_LOGIN}"
+      OAUTH_REDIRECT_URI: "${OAUTH_REDIRECT_URI}"
+      # Optional fallback login for when GitHub is unreachable - see .env.example
+      BASIC_AUTH_USERNAME: "${BASIC_AUTH_USERNAME:-}"
+      BASIC_AUTH_PASSWORD_HASH: "${BASIC_AUTH_PASSWORD_HASH:-}"
+    ports:
+      - "8501:8501"

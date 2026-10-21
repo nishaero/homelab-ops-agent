@@ -1,0 +1,82 @@
+# Copy this file to ops-agent-config.yaml (path set via OPS_AGENT_CONFIG_FILE,
+# default /root/ops-agent-config.yaml - NOT committed to git) and fill in
+# real values. Tunable behavioral settings for the agent; see README.md for
+# which of these are also editable through the admin UI vs. by hand only.
+#
+# NOT here, and never will be: UniFi exclusion, QNAP OS/firmware exclusion,
+# Proxmox+LXC OS-patching exclusion. Those are hard-coded Python logic in
+# ops_agent.py, not config, on purpose.
+
+model: gemma4:31b   # the live setup runs qwen3.8:27b; any local model with tool calling works
+ollama_url: "http://your-ollama-host:11434/api/chat"
+
+cycle_interval_minutes: 20   # keep in sync with ops-agent.timer's OnUnitActiveSec
+notify_cooldown_hours: 4
+health_wait_seconds: 90
+max_update_attempts_per_cycle: 3
+cycle_budget_seconds: 2400   # a heavy cycle stops after this long and keeps what it finished
+heavy_cycle_start_hour: 0    # local time; the model-driven cycle only runs between these hours
+heavy_cycle_end_hour: 5
+adsb_enabled: false          # set to true to manage the ADS-B Pi again
+data_backup_size_limit_gb: 2
+
+docker_hosts:
+  - workstation
+  - docker-lxc
+  - qnap
+
+os_auto_hosts:
+  - workstation
+  - npm-lxc
+  - docker-lxc
+
+# Resource-trend monitoring (check_host_resource_trend) - report/recommend
+# only, see README's Safety mechanisms section. No ceiling is enforced for
+# a host unless listed here; growth alert threshold applies to all hosts.
+host_resource_ceiling_gb:
+  docker-lxc: 6
+resource_growth_alert_pct: 0.5   # flag a container using 50%+ more memory than ~7 days ago
+
+data_containers:
+  workstation:
+    - immich_postgres
+    - immich_server
+    - nextcloud-app
+    - nextcloud-db
+  docker-lxc:
+    - vaultwarden
+  qnap: []
+
+# Proxmox LXCs/VMs that should always be running - see check_proxmox_infra_status().
+# kind is "lxc" or "qm" (matching pct/qm), name is just for readable notifications.
+always_running_proxmox:
+  - {vmid: 101, kind: lxc, name: nginxproxymanager}
+  - {vmid: 102, kind: lxc, name: docker-lxc}
+  - {vmid: 100, kind: qm, name: haos}
+
+# Native (non-Docker) QNAP apps to reachability-check - see check_qnap_app_reachable().
+qnap_apps:
+  - {name: Plex, port: 32400}
+
+compose_dirs:
+  workstation:
+    nextcloud-app: /path/to/nextcloud
+    immich_server: /path/to/immich
+  docker-lxc:
+    vaultwarden: /root/vaultwarden
+
+ntfy:
+  # This is what the AGENT uses to publish - if it and your ntfy
+  # container are on the same LAN (the common case), point this at the
+  # LAN-internal address (e.g. http://192.168.x.x:8223), not the public
+  # HTTPS domain. That avoids an unnecessary round trip through the
+  # public internet/reverse-proxy/DNS for a same-network publish, and
+  # keeps notifications working even before/if the public domain's DNS
+  # or TLS cert isn't set up yet. The public HTTPS domain is what you
+  # type into the phone app to SUBSCRIBE - a separate concern from this.
+  base_url: "http://192.168.x.x:8223"
+  topic: "generate-a-long-random-unguessable-topic-name"
+
+# Automations that must stay enabled. The agent reports any that are off.
+always_enabled_automations:
+  - automation.example_doorbell_notifications

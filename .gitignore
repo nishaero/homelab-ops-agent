@@ -1,0 +1,7 @@
+*.env
+!.env.example
+!ops-agent-api.env.example
+!ops-ui/.env.example
+ops-agent-config.yaml
+__pycache__/
+*.pyc
