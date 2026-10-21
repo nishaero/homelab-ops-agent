@@ -38,11 +38,13 @@ and `notify_human`. A wrong decision is limited to what those functions allow.
 | New Ubuntu LTS check (notify only) | workstation, weekly |
 | Containers | workstation, docker-lxc (LXC 102), QNAP |
 | Home Assistant | REST API only (core, OS and add-on updates) |
-| Never touched | UniFi, QNAP firmware, OS patching of the Proxmox host |
+| Never touched | UniFi, QNAP firmware, OS patching of the Proxmox host and the NAS |
 
-The never-touched list is code, not config. A config edit or a chat request
-cannot change it. The Proxmox host is the hypervisor for everything else, and
-UniFi is the network, so a bad action on either could cut the agent off.
+The never-touched list is code, not config. `NEVER_PATCH_HOSTS` (the Proxmox host and the NAS)
+is filtered out of `os_auto_hosts` when the config is read, and `apply_os_updates` refuses those
+hosts a second time, so editing the config cannot enable patching them. A test starts the agent
+with a config that lists them and checks they are dropped. The Proxmox host is the hypervisor
+for everything else, and UniFi is the network, so a bad action on either could cut the agent off.
 
 The ADS-B Pi is switched off for now. Set `adsb_enabled: true` in the config to
 bring it back.
@@ -51,15 +53,25 @@ bring it back.
 
 - **Updates**: compose projects use `docker compose pull` and `up -d`, which
   keeps volumes and bind mounts. Containers without compose are recreated from
-  a saved `docker inspect`.
+  a saved `docker inspect`: the old container is stopped and renamed to
+  `<name>.ops-old` (not deleted), the new one is created with a faithful copy of
+  its configuration, and a parity check compares the two (command, networks,
+  ports, mounts, devices, privileges, user). If creation or the check fails, the
+  old container is put back untouched. A healthy update removes the preserved one.
 - **Backups**: containers that hold data (Vaultwarden, Nextcloud, Immich) get
   their bind mounts tarred first. Mounts that are too large are skipped and the
   log says so.
 - **Rollback**: the running image is tagged `:ops-agent-rollback` before every
-  update. If the health check fails, the container is recreated from that image
-  using the saved inspect data. It does not go through compose again, because
-  compose would read the `image:` line from the file and ignore the tag. An
-  early version reported a good rollback while the broken image kept running.
+  update. If the health check fails, rollback tries three things in order:
+  1. restore the preserved `<name>.ops-old` container, which has the exact
+     original configuration;
+  2. for compose projects, re-tag the saved image and force-recreate the service
+     without pulling, but only when the compose file still names the original
+     image (otherwise compose would read the `image:` line and ignore the tag);
+  3. recreate from the saved inspect data.
+  An early version reported a good rollback while the broken image kept running,
+  and a later one dropped a container's command and network when it recreated it.
+  Both are why the parity check and the preserved container exist.
 - **Crash detection**: only containers with `restart: always` or
   `unless-stopped` count as crashed. One-shot jobs and containers I stopped on
   purpose are left alone.
@@ -72,12 +84,23 @@ bring it back.
   own, because its only way to reach Home Assistant is the API that is down.
 - **Home Assistant control**: looking at any entity is allowed. Calling
   services is limited to safe domains (lights, switches, climate, fans, media
-  players, scenes, scripts, helpers, timers). Locks, covers and alarm panels
-  are not in the list and have no other way in.
+  players, input helpers, timers and notify), one named entity of the same
+  domain per call, with no target keys (`entity_id`, `area_id` and so on) in the
+  extra data. Locks, covers and alarm panels are not in the list. Scripts and
+  scenes are not in it either, because a script can call `lock.unlock`: each one
+  is callable only if you list it under `ha_allowed_entities` in the config
+  after reading it. Note that a switch or a helper wired to something dangerous
+  is still a switch, so keep unlock paths out of the safe domains.
 - **Automations**: only the chat sidecar can create them, and only after I
   confirm in a later message. The autonomous cycle cannot.
 - **Reports only**: resource growth, restart loops and Ubuntu releases are
   reported. The agent has no tool to act on them.
+- **Argument checks**: everything the model passes to a tool is untrusted, since a
+  changelog or a log could carry an injected instruction. Container names, image
+  references, tags, service names and entity ids must match strict patterns
+  before any tool runs, and the QNAP command quotes its URL and body as single
+  shell arguments. A test tries names with quotes, semicolons, newlines and
+  `$(...)`.
 - **Limits**: the same tool call is stopped after two tries, tool results are
   clipped, and a cycle that runs out of time stops and keeps what it finished.
   A cycle that ends early does not count as the daily update check. It is
@@ -176,11 +199,18 @@ pip install pyyaml pytest
 pytest
 ```
 
-24 tests cover the guard rails that do not need a real host: no shell tool, every tool has an
-implementation, Home Assistant calls are limited to safe domains (no locks, covers or alarm panels),
-hosts that are check only refuse OS updates, tool results are clipped, old tool output is pruned
-without losing the request, and repeated notifications are suppressed. The update, rollback and
-cycle logic is checked on the live system, not by automated tests.
+119 tests cover what does not need a real host:
+
+- the hard exclusions, including a config that lists the Proxmox host and the NAS;
+- argument validation and shell quoting, with hostile container names;
+- Home Assistant limits (safe domains, scripts and scenes only when listed, same domain entity, no retargeting);
+- the model loop: an identical call is refused after two tries, the turn limit, the time budget, a failing
+  model call, unknown tools, tools that raise, and clipping of large output;
+- pure helpers: image reference parsing, newer tag selection and container parity;
+- no shell tool, every tool has an implementation, pruning, and notification dedupe.
+
+The tests that cover the fixes fail against the code before them. The update and rollback sequence
+itself (pull, recreate, health check, restore) is checked on the live system, not by automated tests.
 
 ## Limits
 

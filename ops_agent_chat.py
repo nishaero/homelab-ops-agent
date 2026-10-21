@@ -237,7 +237,7 @@ SYSTEM_PROMPT = (
     "use them to actually check what's going on (an entity's current value, whether it changed "
     "when it should have, whether an automation actually fired) rather than guessing, the same "
     "way you'd debug anything else here. ha_call_service can control lights, switches, climate, "
-    "fans, media players, scenes, scripts, and input_* helpers directly - but it flatly refuses "
+    "fans, media players, timers and input_* helpers directly (scripts and scenes only if named in the config) - but it flatly refuses "
     "any domain outside that allowlist. Locks, covers (garage doors), and alarm panels are NOT "
     "reachable through this tool at all - if asked to touch one of those, say plainly that you "
     "don't have a path to it, don't look for a workaround.\n\n"

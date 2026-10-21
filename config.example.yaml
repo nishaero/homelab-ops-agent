@@ -25,10 +25,16 @@ docker_hosts:
   - docker-lxc
   - qnap
 
+# Hosts the agent may OS-patch. The Proxmox host and the NAS (NEVER_PATCH_HOSTS in the code) are removed
+# from this list even if you add them.
 os_auto_hosts:
   - workstation
   - npm-lxc
   - docker-lxc
+
+# Scripts and scenes can do anything their author put in them, including unlocking a door, so the agent may
+# only call the ones named here. Leave it empty unless you have read each one.
+ha_allowed_entities: []
 
 # Resource-trend monitoring (check_host_resource_trend) - report/recommend
 # only, see README's Safety mechanisms section. No ceiling is enforced for

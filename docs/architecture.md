@@ -1,6 +1,7 @@
 # Home lab architecture
 
-This is the current layout of the home lab that the ops agent looks after.
+This is the layout of the home lab that the ops agent looks after. Network
+addresses and public host names are left out on purpose.
 Last updated 2026-10-21.
 
 ```mermaid
@@ -20,7 +21,7 @@ flowchart TB
             Mon["Prometheus, Grafana,\nAlertmanager, blackbox"]
             Ntfy["ntfy"]
             OpsUI["ops-ui"]
-            Misc["Vaultwarden, Portainer,\nbentopdf"]
+            Misc["Admin and utility\nservices"]
         end
         HAOS["VM 100\nHome Assistant OS\n(USB Wi-Fi stick on the IoT VLAN)"]
         Agent["ops-agent\nsystemd timer, every 20 min"]
@@ -34,6 +35,7 @@ flowchart TB
         Gate["immich-gate\nimmich-yield (temporary)"]
         Face["ha-face\ndoorbell face service"]
         Mem["agent-memory\nAPI + MCP"]
+        Team["hlagents\ncoordinator + specialist agents\nAPI, phone buttons, MCP"]
         NC["Nextcloud stack"]
         Exp["exporters"]
     end
@@ -43,17 +45,14 @@ flowchart TB
         SMB["SMB shares"]
     end
 
-    IoTDev["IoT devices\nAV receiver, TV, doorbell camera,\nplugs, chargers, sensors"]
+    IoTDev["IoT devices\nDenon AVR, TV, Reolink doorbell,\nplugs, chargers, sensors"]
     DR[("homelab-dr\nprivate GitHub repo +\nexternal drive")]
 
     Internet --> CF --> UCG
-    UCG -->|"ports 80 and 443 only"| NPM
+    UCG -->|"HTTPS"| NPM
+    NPM -->|"reverse proxy to internal services"| LXC102
     NPM --> HAOS
-    NPM --> OpsUI
-    NPM --> Ntfy
-    NPM --> Misc
-    NPM --> NC
-    NPM --> Immich
+    NPM --> WS
     IoT --- IoTDev
     HAOS ---|"Wi-Fi stick"| IoT
     VPN -.->|"remote access to Plex and the rest"| Default
@@ -65,6 +64,12 @@ flowchart TB
     Agent -->|"model calls"| Ollama
     Agent -->|"alerts"| Ntfy
     Agent <-->|"notes"| Mem
+    Team -->|"model calls (one at a time)"| Ollama
+    Team -->|"read only lookups"| HAOS
+    Team -.->|"read only"| LXC102
+    Team <-.->|"optional notes"| Mem
+    Team -->|"approval request with buttons"| HAOS
+    HAOS -->|"MCP: ask the team,\nbutton presses"| Team
     Agent -->|"pause and resume at night"| Gate
 
     HAOS -->|"events"| Face
@@ -85,7 +90,7 @@ flowchart TB
 
 - **UCG Max**: gateway, firewall and VPN. It routes four networks: Default,
   IoT, Work and Guest. Public services are published only through
-  nginx-proxy-manager. The agent never touches it.
+  the reverse proxy. The agent never touches it.
 - **Proxmox (pve)**: runs LXC 101 (nginx-proxy-manager),
   LXC 102 (docker-lxc, the monitoring and admin stack), VM 100 (Home Assistant
   OS) and the ops agent itself as a native systemd timer.
@@ -94,16 +99,16 @@ flowchart TB
   devices on the IoT network while the admin connection stays on the wired network.
 - **Workstation**: Ubuntu on Ethernet with an AMD Strix Halo
   GPU. It runs Ollama, Open WebUI, mcpo, Immich, Nextcloud, the doorbell face
-  service, the agent memory service and the metrics exporters.
+  service, the agent memory service, the multi agent team (hlagents) and the metrics exporters.
 - **QNAP NAS**: Plex and the SMB shares that Immich mounts.
 - **ADS-B Pi**: flight tracking receiver. The agent does not manage it right
   now (adsb_enabled is false).
 
-## Public services
+## Public access
 
-All public names end at nginx-proxy-manager (LXC 101) and are proxied to a
-private address. Examples: Home Assistant, the ops UI, ntfy, Vaultwarden,
-Immich, Nextcloud, Grafana, Proxmox, Portainer, Open WebUI and a PDF tool.
+Public names end at a single reverse proxy (LXC 101) and are proxied to private
+addresses. Remote access to everything else goes through the WireGuard server on
+the gateway.
 
 ## Resilience
 

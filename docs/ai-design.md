@@ -110,8 +110,9 @@ ADS-B tools are removed from the list while `adsb_enabled` is false.
 | Guard | What it does |
 |---|---|
 | No shell | The model can only call the tools above. |
-| Hard exclusions | UniFi, QNAP firmware and Proxmox host patching are code rules, not config. |
-| Home Assistant allowlist | `ha_call_service` is limited to safe domains. No locks, covers or alarm panels. |
+| Hard exclusions | UniFi, QNAP firmware and OS patching of the Proxmox host and the NAS are code rules. The never-patch hosts are filtered out of the config and refused again in `apply_os_updates`. |
+| Argument checks | Container names, image references, tags, service names and entity ids from the model must match strict patterns before a tool runs. The QNAP command quotes its URL and body. |
+| Home Assistant allowlist | `ha_call_service` is limited to safe domains, one named entity of the same domain, no target keys in the data. No locks, covers or alarm panels. Scripts and scenes only when named in `ha_allowed_entities`, because a script can unlock a door. |
 | Chat only automations | Creating or editing automations exists only in the chat sidecar, and only after a human confirms in a later message. |
 | Repeat cap | The same tool call with the same arguments is stopped after two tries. |
 | Time budget | `cycle_budget_seconds` (2400). A cycle that runs out stops and keeps its results. |
@@ -119,7 +120,7 @@ ADS-B tools are removed from the list while `adsb_enabled` is false.
 | Context limits | Each tool result is clipped to 6000 characters. The oldest tool output is trimmed once the chat passes 60000 characters. |
 | Update retries | A heavy cycle that ends early does not count as the daily update check. After 3 failed tries the agent sends one notification and waits 24 hours. |
 | Notification dedupe | Notifications with a topic are sent once per cooldown (4 hours). |
-| Rollback | Every update tags the previous image first and restores it if the health check fails. |
+| Rollback | Every update tags the previous image first. Non-compose containers are recreated with the old one kept as `<name>.ops-old`, and a parity check compares the two. If the health check fails, the agent restores the preserved container, or re-tags and force-recreates the compose service, or recreates from the saved inspect data. |
 
 ### Memory
 

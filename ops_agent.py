@@ -66,7 +66,7 @@ import yaml
 # ops_agent_api.py's EDITABLE_KEYS allowlist). Defaults below match prior
 # hard-coded behavior exactly, so a missing/partial config file is never a
 # startup failure. The hard safety exclusions (UniFi never touched, QNAP
-# OS/firmware excluded, Proxmox+LXC OS-patching excluded) are NOT here and
+# OS/firmware excluded, Proxmox host OS-patching excluded: NEVER_PATCH_HOSTS) are NOT config and
 # never will be - those stay Python logic further down this file, on
 # purpose, so no config edit or UI form can widen the agent's blast radius
 # past what was explicitly approved.
@@ -185,17 +185,21 @@ HEAVY_CYCLE_HOURS = range(
 DOCKER_HOSTS = _cfg.get("docker_hosts", ["workstation", "docker-lxc", "qnap"])
 # OS-level apt patching is intentionally scoped down to ONLY the workstation
 # and the ADS-B Pi. Proxmox itself and both its LXCs (101 nginxproxymanager,
-# 102 docker) are the hypervisor + reverse-proxy for this whole fleet -
-# their blast radius is too high for this agent to touch at the OS level,
-# so they get NO apt checking or patching at all (not even check-only).
-# Their *containers* (LXC 102's docker workloads) remain fully managed via
-# DOCKER_HOSTS above - this split is OS-patching scope vs container-mgmt
-# scope, not a host-level exclusion. This list is config-file-editable
-# (by hand, not via the web UI) but the exclusion of Proxmox/its LXCs from
-# it is enforced separately in code, not just by omission here - see
-# check_os_updates()/apply_os_updates() below.
+# 102 docker) run on the hypervisor. The hypervisor itself and the NAS are in
+# NEVER_PATCH_HOSTS above and can never be OS-patched by this agent. The LXCs
+# listed in os_auto_hosts are patched like any other host. This list is
+# config-file-editable (by hand, not via the web UI); the never-patch hosts are
+# filtered out of it in code even if they are listed.
 ADSB_ENABLED = bool(_cfg.get("adsb_enabled", False))  # parked on request; set adsb_enabled: true to bring it back
-OS_AUTO_HOSTS = _cfg.get("os_auto_hosts", ["workstation", "adsb"] if ADSB_ENABLED else ["workstation"])
+# Hosts that are never OS-patched by this agent, whatever the config says: the hypervisor and the NAS.
+# A bad patch or reboot on either takes the agent's own platform down. This is enforced here in code, twice
+# (the config list is filtered, and apply_os_updates refuses), so a hand edit of the config cannot widen it.
+NEVER_PATCH_HOSTS = frozenset({"proxmox-host", "qnap"})
+_requested_os_hosts = list(_cfg.get("os_auto_hosts", ["workstation", "adsb"] if ADSB_ENABLED else ["workstation"]))
+OS_AUTO_HOSTS = [h for h in _requested_os_hosts if h not in NEVER_PATCH_HOSTS]
+if len(OS_AUTO_HOSTS) != len(_requested_os_hosts):
+    logging.getLogger("ops-agent").warning("ignoring never-patch hosts in os_auto_hosts: %s",
+                                           sorted(set(_requested_os_hosts) & NEVER_PATCH_HOSTS))
 OS_CHECK_ONLY_HOSTS = []
 
 # Automations that should always be enabled - see check_expected_automations_enabled()
@@ -307,13 +311,47 @@ def docker_cli(host, args_str, timeout=120):
 
 def qnap_docker_api(method, path, data=None, timeout=60):
     """Talk to QNAP's docker Engine API over its unix socket via curl, since
-    there's no docker CLI installed there."""
-    cmd = f"curl -sS -X {method} --unix-socket /var/run/docker.sock 'http://localhost{path}'"
+    there's no docker CLI installed there. The URL and the body are shell quoted as single
+    arguments, so a value with a quote or a semicolon in it cannot break out of the command."""
+    if method not in ("GET", "POST", "DELETE"):
+        raise ValueError(f"unsupported method {method!r}")
+    url = shlex.quote("http://localhost" + path)
+    cmd = f"curl -sS -X {method} --unix-socket /var/run/docker.sock {url}"
     if data is not None:
-        payload = json.dumps(data).replace("'", "'\\''")
-        cmd = f"curl -sS -X {method} -H 'Content-Type: application/json' --unix-socket /var/run/docker.sock -d '{payload}' 'http://localhost{path}'"
+        cmd = f"curl -sS -X {method} -H 'Content-Type: application/json' --unix-socket /var/run/docker.sock -d {shlex.quote(json.dumps(data))} {url}"
     rc, out, err = run("qnap", cmd, timeout=timeout)
     return rc, out, err
+
+
+# ------------------------------------------------- model supplied arguments --
+# Everything the model passes to a tool is untrusted: a prompt injected into a changelog or a log could try to
+# craft a container name that escapes a shell command or a URL. Names are checked against strict patterns
+# before any tool runs, and the places that build commands also quote their values (defence in depth).
+NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
+IMAGE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:/@+-]{0,255}")
+TAG_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}")
+SERVICE_RE = re.compile(r"[a-z][a-z0-9_]{0,63}")
+ENTITY_RE = re.compile(r"[a-z][a-z0-9_]*\.[a-z0-9_]+")
+ARG_PATTERNS = {"container": NAME_RE, "candidate_image_ref": IMAGE_RE, "candidate_tag": TAG_RE,
+                "domain": SERVICE_RE, "service": SERVICE_RE, "entity_id": ENTITY_RE}
+INT_ARGS = ("lines", "hours", "window_hours", "lookback_hours", "days", "vmid")
+
+
+def validate_tool_args(args):
+    """Raise ValueError if a model supplied argument is not a plain, well formed value."""
+    if not isinstance(args, dict):
+        raise ValueError("arguments must be an object")
+    for key, rx in ARG_PATTERNS.items():
+        if key in args and not (isinstance(args[key], str) and rx.fullmatch(args[key])):
+            raise ValueError(f"invalid {key}: {str(args[key])[:60]!r}")
+    for key in INT_ARGS:
+        if key in args and args[key] is not None:       # null means 'use the default'
+            try:
+                if isinstance(args[key], bool):
+                    raise TypeError
+                args[key] = int(args[key])
+            except (TypeError, ValueError):
+                raise ValueError(f"invalid {key}: {str(args[key])[:30]!r}") from None
 
 
 # ------------------------------------------------------------- tools --
@@ -1649,6 +1687,8 @@ def check_os_updates(host):
 
 
 def apply_os_updates(host):
+    if host in NEVER_PATCH_HOSTS:
+        return {"success": False, "error": f"{host} is never OS-patched by this agent (hard exclusion in code)"}
     if host not in OS_AUTO_HOSTS:
         return {"success": False, "error": f"{host} is check-only, not auto-apply (see module docstring)"}
     log.info(f"[{host}] applying OS updates")
@@ -1807,10 +1847,17 @@ def check_ha_updates():
 # here just because the HA token technically has the scope to call them.
 
 HA_SAFE_SERVICE_DOMAINS = {
-    "light", "switch", "climate", "fan", "media_player", "scene",
-    "script", "input_boolean", "input_number", "input_select", "input_text",
+    "light", "switch", "climate", "fan", "media_player",
+    "input_boolean", "input_number", "input_select", "input_text",
     "timer", "notify",
 }
+# A script or a scene can do anything its author put in it, including unlocking a door, so these two domains
+# are NOT in the safe set. They are callable only for entities listed under ha_allowed_entities in the config
+# (empty by default), which you have read and know do nothing dangerous.
+HA_RESTRICTED_DOMAINS = {"script", "scene"}
+HA_ALLOWED_ENTITIES = set(_cfg.get("ha_allowed_entities", []))
+# Keys that would aim a service call at something other than the one named entity.
+HA_TARGET_KEYS = {"entity_id", "device_id", "area_id", "floor_id", "label_id"}
 
 
 def ha_search_entities(query):
@@ -1875,8 +1922,14 @@ def ha_call_service(domain, service, entity_id, data=None):
     domain=light, service=turn_on, entity_id=light.kitchen. Restricted to
     HA_SAFE_SERVICE_DOMAINS - locks, covers/garage doors, and alarm panels
     are intentionally not callable this way."""
-    if domain not in HA_SAFE_SERVICE_DOMAINS:
+    if domain not in HA_SAFE_SERVICE_DOMAINS and domain not in HA_RESTRICTED_DOMAINS:
         return {"error": f"domain {domain!r} is not in the allowed set: {sorted(HA_SAFE_SERVICE_DOMAINS)}"}
+    if not (isinstance(entity_id, str) and ENTITY_RE.fullmatch(entity_id) and entity_id.startswith(domain + ".")):
+        return {"error": "entity_id must be one entity of the same domain as the service, for example light.kitchen"}
+    if domain in HA_RESTRICTED_DOMAINS and entity_id not in HA_ALLOWED_ENTITIES:
+        return {"error": f"{entity_id} is not listed in ha_allowed_entities. Scripts and scenes can reach anything, including locks, so each one must be allowed by name in the config"}
+    if data and HA_TARGET_KEYS & set(data):
+        return {"error": "data may not contain a target (entity_id, device_id, area_id, floor_id, label_id)"}
     body = {"entity_id": entity_id}
     if data:
         body.update(data)
@@ -2590,7 +2643,7 @@ TOOLS = [
     }},
     {"type": "function", "function": {
         "name": "check_os_updates",
-        "description": "Check available OS package updates on a host. Only workstation and adsb are valid - Proxmox and its LXCs are never OS-patched by this agent (only their containers are managed, via the docker tools).",
+        "description": "Check available OS package updates on a host. Only hosts listed in os_auto_hosts are valid. The Proxmox host and the NAS are never OS-patched by this agent, whatever the config says.",
         "parameters": {"type": "object", "properties": {
             "host": {"type": "string", "enum": OS_AUTO_HOSTS}},
             "required": ["host"]},
@@ -2662,8 +2715,8 @@ TOOLS = [
         "description": (
             "Call a Home Assistant service to control something - e.g. domain=light, service=turn_on, "
             "entity_id=light.kitchen. Restricted to a safe-domain allowlist (lights, switches, climate, "
-            "fans, media players, scenes, scripts, input_* helpers, timers) - locks, covers/garage doors, "
-            "and alarm panels are NOT callable this way, there is no path to them."
+            "fans, media players, input_* helpers, timers, notify) - locks, covers/garage doors, "
+            "and alarm panels are NOT callable this way, and scripts and scenes only if named in the config."
         ),
         "parameters": {"type": "object", "properties": {
             "domain": {"type": "string"},
@@ -3174,6 +3227,75 @@ def run_lightweight_cycle():
     }
 
 
+MAX_TURNS = 25   # model turns per cycle; a confused model cannot loop forever
+
+
+def run_model_loop(messages):
+    """Let the model call tools until it gives a final answer, with the cycle's guard rails:
+    an identical call is refused after two tries, there is a turn limit and a wall clock budget,
+    model arguments are validated before any tool runs, and tool output is clipped and pruned.
+    Returns (actions_taken, aborted). aborted is True when the cycle stopped early (budget used up
+    or the model call failed), which makes the caller retry the update check later."""
+    actions_taken = []
+    aborted = False
+    seen_calls = {}
+    cycle_t0 = time.monotonic()
+    for turn in range(MAX_TURNS):  # hard cap so a confused model can't loop forever
+        if time.monotonic() - cycle_t0 > CYCLE_BUDGET_SECONDS:
+            log.warning("cycle time budget exhausted - stopping with partial results")
+            aborted = True
+            _mem_log("ops_cycle", "Ops cycle stopped early: time budget exhausted after %d tool calls" % len(actions_taken))
+            break
+        try:
+            resp = call_model(messages)
+        except Exception as e:
+            log.exception("model call failed mid-cycle - ending cycle with partial results")
+            aborted = True
+            notify_human("Ops agent model call failed mid-cycle",
+                         f"{e} (after {len(actions_taken)} tool calls; will retry next cycle)")
+            break
+        msg = resp.get("message", {})
+        tool_calls = msg.get("tool_calls", [])
+        messages.append(msg)
+
+        if not tool_calls:
+            log.info(f"model final summary: {msg.get('content', '')}")
+            _mem_log("ops_cycle", "Ops cycle summary: " + str(msg.get("content", "")))
+            break
+
+        for call in tool_calls:
+            fn_name = call["function"]["name"]
+            args = call["function"]["arguments"]
+            if isinstance(args, str):
+                args = json.loads(args)
+            impl = TOOL_IMPL.get(fn_name)
+            call_key = fn_name + json.dumps(args, sort_keys=True, default=str)
+            seen_calls[call_key] = seen_calls.get(call_key, 0) + 1
+            if seen_calls[call_key] > 2:
+                result = {"error": "identical call already made twice this cycle; do not repeat it - report the outcome and finish"}
+            elif not impl:
+                result = {"error": f"unknown tool {fn_name}"}
+            else:
+                try:
+                    validate_tool_args(args)
+                except ValueError as e:
+                    log.warning(f"tool call rejected, bad argument: {fn_name}: {e}")
+                    result = {"error": f"rejected: {e}"}
+                else:
+                    try:
+                        result = impl(**args)
+                    except Exception as e:
+                        log.exception(f"tool {fn_name} raised")
+                        result = {"error": str(e)}
+            log.info(f"tool call: {fn_name}({args}) -> {str(result)[:200]}")
+            actions_taken.append({"tool": fn_name, "args": args, "result_summary": str(result)[:300]})
+            messages.append({"role": "tool", "content": _clip_tool_result(result)})
+        _prune_messages(messages)
+    else:
+        log.warning("hit max turns for this cycle - stopping")
+    return actions_taken, aborted
+
+
 def run_cycle(check_updates_this_cycle):
     log.info(f"=== cycle start (check_updates={check_updates_this_cycle}) ===")
     _wait_for_ollama_idle()
@@ -3378,57 +3500,7 @@ def run_cycle(check_updates_this_cycle):
 
     messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_content}]
 
-    actions_taken = []
-    aborted = False
-    seen_calls = {}
-    cycle_t0 = time.monotonic()
-    for turn in range(25):  # hard cap so a confused model can't loop forever
-        if time.monotonic() - cycle_t0 > CYCLE_BUDGET_SECONDS:
-            log.warning("cycle time budget exhausted - stopping with partial results")
-            aborted = True
-            _mem_log("ops_cycle", "Ops cycle stopped early: time budget exhausted after %d tool calls" % len(actions_taken))
-            break
-        try:
-            resp = call_model(messages)
-        except Exception as e:
-            log.exception("model call failed mid-cycle - ending cycle with partial results")
-            aborted = True
-            notify_human("Ops agent model call failed mid-cycle",
-                         f"{e} (after {len(actions_taken)} tool calls; will retry next cycle)")
-            break
-        msg = resp.get("message", {})
-        tool_calls = msg.get("tool_calls", [])
-        messages.append(msg)
-
-        if not tool_calls:
-            log.info(f"model final summary: {msg.get('content', '')}")
-            _mem_log("ops_cycle", "Ops cycle summary: " + str(msg.get("content", "")))
-            break
-
-        for call in tool_calls:
-            fn_name = call["function"]["name"]
-            args = call["function"]["arguments"]
-            if isinstance(args, str):
-                args = json.loads(args)
-            impl = TOOL_IMPL.get(fn_name)
-            call_key = fn_name + json.dumps(args, sort_keys=True, default=str)
-            seen_calls[call_key] = seen_calls.get(call_key, 0) + 1
-            if seen_calls[call_key] > 2:
-                result = {"error": "identical call already made twice this cycle; do not repeat it - report the outcome and finish"}
-            elif not impl:
-                result = {"error": f"unknown tool {fn_name}"}
-            else:
-                try:
-                    result = impl(**args)
-                except Exception as e:
-                    log.exception(f"tool {fn_name} raised")
-                    result = {"error": str(e)}
-            log.info(f"tool call: {fn_name}({args}) -> {str(result)[:200]}")
-            actions_taken.append({"tool": fn_name, "args": args, "result_summary": str(result)[:300]})
-            messages.append({"role": "tool", "content": _clip_tool_result(result)})
-        _prune_messages(messages)
-    else:
-        log.warning("hit max turns for this cycle - stopping")
+    actions_taken, aborted = run_model_loop(messages)
 
     log.info(f"=== cycle end, {len(actions_taken)} tool calls ===")
     return {
